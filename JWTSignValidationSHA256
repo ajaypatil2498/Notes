@@ -1,0 +1,174 @@
+Sure, I'll adjust the code so that the JWK set is fetched in the JwtValidationService instead of JwtUtil. This way, JwtUtil will only handle the validation logic, while JwtValidationService will manage fetching the JWK set and invoking the validation.
+
+Step 1: Define Models for JWK Response
+These remain unchanged from the previous response.
+
+Step 2: Fetch and Parse the JWK Set
+Service to fetch the JWK set from the API.
+
+java
+Copy code
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
+
+import com.nimbusds.jose.jwk.JWK;
+import com.nimbusds.jose.jwk.JWKSet;
+
+import java.text.ParseException;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Service
+public class JWKService {
+
+    @Value("${jwk.url}")
+    private String jwkUrl;
+
+    public JWKSet fetchJWKSet() throws ParseException {
+        RestTemplate restTemplate = new RestTemplate();
+        JWKResponse200 jwkResponse200 = restTemplate.getForObject(jwkUrl, JWKResponse200.class);
+
+        if (jwkResponse200 != null) {
+            List<JWK> jwks = jwkResponse200.getKeys().stream()
+                .map(jwkResponse -> {
+                    try {
+                        return new JWK.Builder(jwkResponse.getKty())
+                            .keyID(jwkResponse.getKid())
+                            .algorithm(jwkResponse.getAlg())
+                            .keyValue(jwkResponse.getN(), jwkResponse.getE())
+                            .build();
+                    } catch (ParseException e) {
+                        e.printStackTrace();
+                        return null;
+                    }
+                })
+                .collect(Collectors.toList());
+
+            return new JWKSet(jwks);
+        }
+
+        throw new ParseException("Failed to fetch JWK Set", 0);
+    }
+}
+Step 3: Update JwtUtil to Only Handle Validation
+Update JwtUtil to only handle the JWT validation logic.
+
+java
+Copy code
+import com.nimbusds.jose.JOSEException;
+import com.nimbusds.jose.JWSAlgorithm;
+import com.nimbusds.jose.JWSVerifier;
+import com.nimbusds.jose.crypto.RSASSAVerifier;
+import com.nimbusds.jose.jwk.JWK;
+import com.nimbusds.jose.jwk.JWKSet;
+import com.nimbusds.jose.jwk.RSAKey;
+import com.nimbusds.jwt.SignedJWT;
+
+import org.springframework.stereotype.Component;
+
+import java.security.interfaces.RSAPublicKey;
+import java.text.ParseException;
+
+@Component
+public class JwtUtil {
+
+    public boolean validateToken(String token, JWKSet jwkSet) {
+        try {
+            SignedJWT signedJWT = SignedJWT.parse(token);
+
+            // Extract the key ID from the JWT header
+            String keyID = signedJWT.getHeader().getKeyID();
+
+            // Retrieve the RSA key from the JWK set using the key ID
+            JWK jwk = jwkSet.getKeyByKeyId(keyID);
+            if (jwk == null || !JWSAlgorithm.RS256.equals(jwk.getAlgorithm())) {
+                return false;
+            }
+
+            RSAKey rsaKey = (RSAKey) jwk;
+            RSAPublicKey publicKey = rsaKey.toRSAPublicKey();
+
+            // Create an RSA verifier
+            JWSVerifier verifier = new RSASSAVerifier(publicKey);
+
+            // Verify the signature
+            return signedJWT.verify(verifier);
+        } catch (ParseException | JOSEException e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+}
+Step 4: JwtValidationService to Handle JWK Fetching and Validation
+Modify JwtValidationService to fetch the JWK set and use JwtUtil for validation.
+
+java
+Copy code
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
+
+@Service
+public class JwtValidationService {
+
+    private final JWKService jwkService;
+    private final JwtUtil jwtUtil;
+
+    @Autowired
+    public JwtValidationService(JWKService jwkService, JwtUtil jwtUtil) {
+        this.jwkService = jwkService;
+        this.jwtUtil = jwtUtil;
+    }
+
+    public boolean validateToken(String token) {
+        try {
+            JWKSet jwkSet = jwkService.fetchJWKSet();
+            return jwtUtil.validateToken(token, jwkSet);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+}
+Step 5: Update the Controller
+Autowire the JwtValidationService in the controller.
+
+java
+Copy code
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+public class TokenController {
+
+    private final JwtValidationService jwtValidationService;
+
+    @Autowired
+    public TokenController(JwtValidationService jwtValidationService) {
+        this.jwtValidationService = jwtValidationService;
+    }
+
+    @GetMapping("/validate-token")
+    public String validateToken(@RequestHeader("Authorization") String authorizationHeader) {
+        String token = authorizationHeader.replace("Bearer ", "");
+        boolean isValid = jwtValidationService.validateToken(token);
+        return isValid ? "Token is valid" : "Token is invalid";
+    }
+}
+Step 6: Configuration
+Add the URL for the JWK set endpoint in application.properties:
+
+properties
+Copy code
+jwk.url=https://example.com/oidc/oidcJWK
+Summary
+In this implementation:
+
+JWKService: Fetches the JWK set from a public API endpoint.
+JwtUtil: Handles the JWT validation logic.
+JwtValidationService: Fetches the JWK set using JWKService and uses JwtUtil for validation.
+TokenController: Exposes an endpoint to validate the JWT using JwtValidationService.
+Configuration: The JWK set URL is configurable via application.properties.
+This setup ensures your application can dynamically fetch and validate JWTs using the Nimbus JOSE+JWT library with dependency injection.
